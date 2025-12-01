@@ -65,8 +65,23 @@ def test_attention_gqa_matches_grouped_behavior():
 
     assert torch.allclose(modern_out, gt_out, atol=1e-5)
 
+def test_attention_mqa_matches_grouped_behavior():
+    torch.manual_seed(3)
+    batch, seq_len, dim, heads = 2, 4, 64, 4
+    group_size = heads
+    kv_heads = heads // group_size
+    modern = ModernAttention(dim, heads, dp_rate=0.0, kv_heads=kv_heads)
+    gt = GQAAttention(heads, dim, kv_heads)
+    gt.load_state_dict(modern.state_dict())
+    x = torch.randn(batch, seq_len, dim)
+    modern_out = modern(x)
+    gt_out = gt(x)
+
+    assert torch.allclose(modern_out, gt_out, atol=1e-5)
+
 test_attention_mha_matches_legacy()
 test_transformer_mha_matches_legacy()
 test_attention_mqa_reduces_to_single_kv_head()
 test_attention_gqa_matches_grouped_behavior()
+test_attention_mqa_matches_grouped_behavior()
 print("All tests passed")
