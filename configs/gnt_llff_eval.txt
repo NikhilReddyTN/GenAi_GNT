@@ -1,6 +1,7 @@
 ### INPUT
-expname = gnt_llff
+expname = gnt_llff_eval_decay
 rootdir = ./
+ckpt_path = ./out/gnt_llff_decay/model_030000.pth
 render_stride = 2
 distributed = False
 
@@ -30,5 +31,5 @@ white_bkgd = False
 
 ### CONSOLE AND TENSORBOARD
 i_img = 50000
-i_print = 1000
-i_weights = 10000
+i_print = 100
+i_weights = 100

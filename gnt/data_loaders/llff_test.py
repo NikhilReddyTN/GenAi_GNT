@@ -28,6 +28,8 @@ class LLFFTestDataset(Dataset):
         self.train_rgb_files = []
 
         all_scenes = os.listdir(self.folder_path)
+        # using only fern
+        all_scenes = all_scenes[0]
         if len(scenes) > 0:
             if isinstance(scenes, str):
                 scenes = [scenes]
@@ -37,6 +39,7 @@ class LLFFTestDataset(Dataset):
         print("loading {} for {}".format(scenes, mode))
         for i, scene in enumerate(scenes):
             scene_path = os.path.join(self.folder_path, scene)
+            print("scene_path", scene_path)
             _, poses, bds, render_poses, i_test, rgb_files = load_llff_data(
                 scene_path, load_imgs=False, factor=4
             )

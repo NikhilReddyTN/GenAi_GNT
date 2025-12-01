@@ -1,5 +1,5 @@
 ### INPUT
-expname = gnt_llff
+expname = gnt_llff_decay_2
 rootdir = ./
 render_stride = 2
 distributed = False
@@ -15,7 +15,7 @@ N_rand = 2048
 lrate_feature = 0.001
 lrate_gnt = 0.0005
 lrate_decay_factor = 0.5
-lrate_decay_steps = 50000
+lrate_decay_steps = 10000
 single_net = True
 trans_depth = 4
 
@@ -29,6 +29,6 @@ inv_uniform = True
 white_bkgd = False
 
 ### CONSOLE AND TENSORBOARD
-i_img = 50000
-i_print = 1000
+i_img = 30000
+i_print = 1
 i_weights = 10000

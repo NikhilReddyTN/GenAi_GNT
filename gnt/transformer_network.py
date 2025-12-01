@@ -119,11 +119,22 @@ class Transformer2D(nn.Module):
 #   - pos -> replace (q.k) attention with position attention.
 #   - gate -> weighted addition of  (q.k) attention and position attention.
 class Attention(nn.Module):
-    def __init__(self, dim, n_heads, dp_rate, attn_mode="qk", pos_dim=None):
+    def __init__(self, dim, n_heads, dp_rate, attn_mode="qk", pos_dim=None, kv_heads=None):
         super(Attention, self).__init__()
+        if dim % n_heads != 0:
+            raise ValueError("dim must be divisible by n_heads")
+        self.n_heads = n_heads
+        self.head_dim = dim // n_heads
+        self.kv_heads = kv_heads if kv_heads is not None else n_heads
+        if self.kv_heads < 1:
+            raise ValueError("kv_heads must be >= 1")
+        if self.n_heads % self.kv_heads != 0:
+            raise ValueError("n_heads must be divisible by kv_heads for grouped attention")
+        self.heads_per_kv = self.n_heads // self.kv_heads
+        self.kv_dim = self.head_dim * self.kv_heads
         if attn_mode in ["qk", "gate"]:
-            self.q_fc = nn.Linear(dim, dim, bias=False)
-            self.k_fc = nn.Linear(dim, dim, bias=False)
+            self.q_fc = nn.Linear(dim, self.head_dim * self.n_heads, bias=False)
+            self.k_fc = nn.Linear(dim, self.kv_dim, bias=False)
         if attn_mode in ["pos", "gate"]:
             self.pos_fc = nn.Sequential(
                 nn.Linear(pos_dim, pos_dim), nn.ReLU(), nn.Linear(pos_dim, dim // 8)
@@ -131,20 +142,26 @@ class Attention(nn.Module):
             self.head_fc = nn.Linear(dim // 8, n_heads)
         if attn_mode == "gate":
             self.gate = nn.Parameter(torch.ones(n_heads))
-        self.v_fc = nn.Linear(dim, dim, bias=False)
+        self.v_fc = nn.Linear(dim, self.kv_dim, bias=False)
         self.out_fc = nn.Linear(dim, dim)
         self.dp = nn.Dropout(dp_rate)
-        self.n_heads = n_heads
         self.attn_mode = attn_mode
+
+    def expand_kv(self, x):
+        if self.heads_per_kv == 1:
+            return x
+        return x.repeat_interleave(self.heads_per_kv, dim=1)
 
     def forward(self, x, pos=None, ret_attn=False):
         if self.attn_mode in ["qk", "gate"]:
             q = self.q_fc(x)
-            q = q.view(x.shape[0], x.shape[1], self.n_heads, -1).permute(0, 2, 1, 3)
+            q = q.view(x.shape[0], x.shape[1], self.n_heads, self.head_dim).permute(0, 2, 1, 3)
             k = self.k_fc(x)
-            k = k.view(x.shape[0], x.shape[1], self.n_heads, -1).permute(0, 2, 1, 3)
+            k = k.view(x.shape[0], x.shape[1], self.kv_heads, self.head_dim).permute(0, 2, 1, 3)
+            k = self.expand_kv(k)
         v = self.v_fc(x)
-        v = v.view(x.shape[0], x.shape[1], self.n_heads, -1).permute(0, 2, 1, 3)
+        v = v.view(x.shape[0], x.shape[1], self.kv_heads, self.head_dim).permute(0, 2, 1, 3)
+        v = self.expand_kv(v)
 
         if self.attn_mode in ["qk", "gate"]:
             attn = torch.matmul(q, k.transpose(-2, -1)) / np.sqrt(q.shape[-1])
@@ -174,14 +191,14 @@ class Attention(nn.Module):
 # Ray Transformer
 class Transformer(nn.Module):
     def __init__(
-        self, dim, ff_hid_dim, ff_dp_rate, n_heads, attn_dp_rate, attn_mode="qk", pos_dim=None
+        self, dim, ff_hid_dim, ff_dp_rate, n_heads, attn_dp_rate, attn_mode="qk", pos_dim=None, kv_heads=None
     ):
         super(Transformer, self).__init__()
         self.attn_norm = nn.LayerNorm(dim, eps=1e-6)
         self.ff_norm = nn.LayerNorm(dim, eps=1e-6)
 
         self.ff = FeedForward(dim, ff_hid_dim, ff_dp_rate)
-        self.attn = Attention(dim, n_heads, attn_dp_rate, attn_mode, pos_dim)
+        self.attn = Attention(dim, n_heads, attn_dp_rate, attn_mode, pos_dim, kv_heads)
 
     def forward(self, x, pos=None, ret_attn=False):
         residue = x
@@ -215,6 +232,10 @@ class GNT(nn.Module):
         self.view_selftrans = nn.ModuleList([])
         self.view_crosstrans = nn.ModuleList([])
         self.q_fcs = nn.ModuleList([])
+        self.num_attn_heads = 4
+        self.attn_type = getattr(args, "attn_type", "mha").lower()
+        self.gqa_group_size = getattr(args, "gqa_group_size", 2)
+        kv_heads = self.compute_kv_heads(self.attn_type, self.num_attn_heads, self.gqa_group_size)
         for i in range(args.trans_depth):
             # view transformer
             view_trans = Transformer2D(
@@ -228,9 +249,10 @@ class GNT(nn.Module):
             ray_trans = Transformer(
                 dim=args.netwidth,
                 ff_hid_dim=int(args.netwidth * 4),
-                n_heads=4,
+                n_heads=self.num_attn_heads,
                 ff_dp_rate=0.1,
                 attn_dp_rate=0.1,
+                kv_heads=kv_heads,
             )
             self.view_selftrans.append(ray_trans)
             # mlp
@@ -266,6 +288,20 @@ class GNT(nn.Module):
             log_sampling=True,
             periodic_fns=[torch.sin, torch.cos],
         )
+
+    def compute_kv_heads(self, attn_type, n_heads, gqa_group_size):
+        attn_type = attn_type.lower()
+        if attn_type == "mha":
+            return n_heads
+        if attn_type == "mqa":
+            return 1
+        if attn_type == "gqa":
+            if gqa_group_size < 1:
+                raise ValueError("gqa_group_size must be >= 1")
+            if n_heads % gqa_group_size != 0:
+                raise ValueError("n_heads must be divisible by gqa_group_size for GQA")
+            return n_heads // gqa_group_size
+        raise ValueError("Unknown attention type: {}".format(attn_type))
 
     def forward(self, rgb_feat, ray_diff, mask, pts, ray_d):
         # compute positional embeddings

@@ -10,7 +10,7 @@ from gnt.data_loaders import dataset_dict
 from gnt.render_image import render_single_image
 from gnt.model import GNTModel
 from gnt.sample_ray import RaySamplerSingleImage
-from utils import img_HWC2CHW, colorize, img2psnr, lpips, ssim
+from utils import img_HWC2CHW, colorize, img2psnr, lpips, ssim, to8b
 import config
 import torch.distributed as dist
 from gnt.projection import Projector
@@ -186,6 +186,7 @@ def log_view(
 
     rgb_coarse = rgb_coarse.permute(1, 2, 0).detach().cpu().numpy()
     filename = os.path.join(out_folder, prefix[:-1] + "_{:03d}_coarse.png".format(global_step))
+    rgb_coarse = to8b(rgb_coarse)
     imageio.imwrite(filename, rgb_coarse)
 
     if depth_coarse is not None:

@@ -113,33 +113,41 @@ def train(args):
                 center_ratio=args.center_ratio,
             )
 
-            featmaps = model.feature_net(ray_batch["src_rgbs"].squeeze(0).permute(0, 3, 1, 2))
+            with torch.profiler.profile(
+                activities=[torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA],
+                with_flops=True,
+                record_shapes=True,
+                profile_memory=True,
+            ) as prof:
+                featmaps = model.feature_net(ray_batch["src_rgbs"].squeeze(0).permute(0, 3, 1, 2))
 
-            ret = render_rays(
-                ray_batch=ray_batch,
-                model=model,
-                projector=projector,
-                featmaps=featmaps,
-                N_samples=args.N_samples,
-                inv_uniform=args.inv_uniform,
-                N_importance=args.N_importance,
-                det=args.det,
-                white_bkgd=args.white_bkgd,
-                ret_alpha=args.N_importance > 0,
-                single_net=args.single_net,
-            )
-
-            # compute loss
-            model.optimizer.zero_grad()
-            loss, scalars_to_log = criterion(ret["outputs_coarse"], ray_batch, scalars_to_log)
-
-            if ret["outputs_fine"] is not None:
-                fine_loss, scalars_to_log = criterion(
-                    ret["outputs_fine"], ray_batch, scalars_to_log
+                ret = render_rays(
+                    ray_batch=ray_batch,
+                    model=model,
+                    projector=projector,
+                    featmaps=featmaps,
+                    N_samples=args.N_samples,
+                    inv_uniform=args.inv_uniform,
+                    N_importance=args.N_importance,
+                    det=args.det,
+                    white_bkgd=args.white_bkgd,
+                    ret_alpha=args.N_importance > 0,
+                    single_net=args.single_net,
                 )
-                loss += fine_loss
 
-            loss.backward()
+                # compute loss
+                model.optimizer.zero_grad()
+                loss, scalars_to_log = criterion(ret["outputs_coarse"], ray_batch, scalars_to_log)
+
+                if ret["outputs_fine"] is not None:
+                    fine_loss, scalars_to_log = criterion(
+                        ret["outputs_fine"], ray_batch, scalars_to_log
+                    )
+                    loss += fine_loss
+
+                loss.backward()
+
             scalars_to_log["loss"] = loss.item()
             model.optimizer.step()
             model.scheduler.step()
@@ -217,6 +225,7 @@ def train(args):
             if global_step > model.start_step + args.n_iters + 1:
                 break
         epoch += 1
+        print(prof.key_averages().table(sort_by="flops"))
 
 
 @torch.no_grad()
