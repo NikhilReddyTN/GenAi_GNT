@@ -115,6 +115,12 @@ def config_parser():
         default=True,
         help="use single network for both coarse and/or fine sampling",
     )
+    parser.add_argument(
+        "--attn_type", type=str, default="mha", help="type of headed-attention (choose from mqa, mha, gqa)"
+    )
+    parser.add_argument(
+        "--gqa_group_size", type=int, default=1, help="number of groups for query heads in gqa"
+    )
 
     ########## checkpoints ##########
     parser.add_argument(
