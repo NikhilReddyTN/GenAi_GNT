@@ -2,6 +2,17 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+
+def rotate_half(x):
+    x1 = x[..., ::2]
+    x2 = x[..., 1::2]
+    stacked = torch.stack((-x2, x1), dim=-1)
+    return stacked.view_as(x)
+
+
+def apply_rotary_pos_emb(x, cos, sin):
+    return (x * cos) + (rotate_half(x) * sin)
+
 # sin-cose embedding module
 class Embedder(nn.Module):
     def __init__(self, **kwargs):
@@ -119,7 +130,9 @@ class Transformer2D(nn.Module):
 #   - pos -> replace (q.k) attention with position attention.
 #   - gate -> weighted addition of  (q.k) attention and position attention.
 class Attention(nn.Module):
-    def __init__(self, dim, n_heads, dp_rate, attn_mode="qk", pos_dim=None, kv_heads=None):
+    def __init__(
+        self, dim, n_heads, dp_rate, attn_mode="qk", pos_dim=None, kv_heads=None, use_rope=False
+    ):
         super(Attention, self).__init__()
         if dim % n_heads != 0:
             raise ValueError("dim must be divisible by n_heads")
@@ -146,11 +159,28 @@ class Attention(nn.Module):
         self.out_fc = nn.Linear(dim, dim)
         self.dp = nn.Dropout(dp_rate)
         self.attn_mode = attn_mode
+        self.use_rope = use_rope
+        if self.use_rope:
+            if attn_mode not in ["qk", "gate"]:
+                raise ValueError("RoPE can only be used with qk or gate attention modes.")
+            if pos_dim is None:
+                raise ValueError("pos_dim must be provided when using RoPE.")
+            if self.head_dim % 2 != 0:
+                raise ValueError("head_dim must be even to use RoPE.")
+            self.rope_proj = nn.Linear(pos_dim, self.head_dim, bias=False)
 
     def expand_kv(self, x):
         if self.heads_per_kv == 1:
             return x
         return x.repeat_interleave(self.heads_per_kv, dim=1)
+
+    def _compute_rope_angles(self, pos):
+        if pos is None:
+            raise ValueError("pos must be provided when using RoPE.")
+        angles = self.rope_proj(pos)  # (B, seq, head_dim)
+        cos = torch.cos(angles).unsqueeze(1)
+        sin = torch.sin(angles).unsqueeze(1)
+        return cos, sin
 
     def forward(self, x, pos=None, ret_attn=False):
         if self.attn_mode in ["qk", "gate"]:
@@ -162,6 +192,11 @@ class Attention(nn.Module):
         v = self.v_fc(x)
         v = v.view(x.shape[0], x.shape[1], self.kv_heads, self.head_dim).permute(0, 2, 1, 3)
         v = self.expand_kv(v)
+
+        if self.use_rope and self.attn_mode in ["qk", "gate"]:
+            cos, sin = self._compute_rope_angles(pos)
+            q = apply_rotary_pos_emb(q, cos, sin)
+            k = apply_rotary_pos_emb(k, cos, sin)
 
         if self.attn_mode in ["qk", "gate"]:
             attn = torch.matmul(q, k.transpose(-2, -1)) / np.sqrt(q.shape[-1])
@@ -191,16 +226,30 @@ class Attention(nn.Module):
 # Ray Transformer
 class Transformer(nn.Module):
     def __init__(
-        self, dim, ff_hid_dim, ff_dp_rate, n_heads, attn_dp_rate, attn_mode="qk", pos_dim=None, kv_heads=None
+        self,
+        dim,
+        ff_hid_dim,
+        ff_dp_rate,
+        n_heads,
+        attn_dp_rate,
+        attn_mode="qk",
+        pos_dim=None,
+        kv_heads=None,
+        use_rope=False,
     ):
         super(Transformer, self).__init__()
         self.attn_norm = nn.LayerNorm(dim, eps=1e-6)
         self.ff_norm = nn.LayerNorm(dim, eps=1e-6)
 
         self.ff = FeedForward(dim, ff_hid_dim, ff_dp_rate)
-        self.attn = Attention(dim, n_heads, attn_dp_rate, attn_mode, pos_dim, kv_heads)
+        self.attn = Attention(dim, n_heads, attn_dp_rate, attn_mode, pos_dim, kv_heads, use_rope)
+        self.use_rope = use_rope
 
     def forward(self, x, pos=None, ret_attn=False):
+        if self.use_rope and pos is None:
+            raise ValueError("RoPE is enabled but no positional embeddings were provided.")
+        if pos is not None and (pos.shape[0] != x.shape[0] or pos.shape[1] != x.shape[1]):
+            raise ValueError("Positional embeddings must align with the input sequence shape.")
         residue = x
         x = self.attn_norm(x)
         x = self.attn(x, pos, ret_attn)
@@ -222,6 +271,7 @@ class Transformer(nn.Module):
 class GNT(nn.Module):
     def __init__(self, args, in_feat_ch=32, posenc_dim=3, viewenc_dim=3, ret_alpha=False):
         super(GNT, self).__init__()
+        self.use_rope = getattr(args, "use_rope", False)
         self.rgbfeat_fc = nn.Sequential(
             nn.Linear(in_feat_ch + 3, args.netwidth),
             nn.ReLU(),
@@ -252,7 +302,10 @@ class GNT(nn.Module):
                 n_heads=self.num_attn_heads,
                 ff_dp_rate=0.1,
                 attn_dp_rate=0.1,
+                attn_mode="qk",
+                pos_dim=posenc_dim + viewenc_dim if self.use_rope else None,
                 kv_heads=kv_heads,
+                use_rope=self.use_rope,
             )
             self.view_selftrans.append(ray_trans)
             # mlp
@@ -315,6 +368,7 @@ class GNT(nn.Module):
         viewdirs_ = viewdirs[:, None].expand(pts_.shape)
         embed = torch.cat([pts_, viewdirs_], dim=-1)
         input_pts, input_views = torch.split(embed, [self.posenc_dim, self.viewenc_dim], dim=-1)
+        rope_pos = embed if self.use_rope else None
 
         # project rgb features to netwidth
         rgb_feat = self.rgbfeat_fc(rgb_feat)
@@ -332,7 +386,7 @@ class GNT(nn.Module):
                 q = torch.cat((q, input_pts, input_views), dim=-1)
                 q = q_fc(q)
             # ray transformer
-            q = selftrans(q, ret_attn=self.ret_alpha)
+            q = selftrans(q, pos=rope_pos, ret_attn=self.ret_alpha)
             # 'learned' density
             if self.ret_alpha:
                 q, attn = q

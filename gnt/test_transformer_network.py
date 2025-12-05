@@ -79,9 +79,76 @@ def test_attention_mqa_matches_grouped_behavior():
 
     assert torch.allclose(modern_out, gt_out, atol=1e-5)
 
+def test_attention_rope_matches_no_rope_when_projection_zero():
+    torch.manual_seed(4)
+    batch, seq_len, dim, heads = 2, 3, 32, 4
+    x = torch.randn(batch, seq_len, dim)
+    pos = torch.randn(batch, seq_len, dim)
+
+    base = ModernAttention(dim, heads, dp_rate=0.0, kv_heads=heads)
+    rope = ModernAttention(
+        dim,
+        heads,
+        dp_rate=0.0,
+        attn_mode="qk",
+        pos_dim=dim,
+        kv_heads=heads,
+        use_rope=True,
+    )
+    rope.q_fc.load_state_dict(base.q_fc.state_dict())
+    rope.k_fc.load_state_dict(base.k_fc.state_dict())
+    rope.v_fc.load_state_dict(base.v_fc.state_dict())
+    rope.out_fc.load_state_dict(base.out_fc.state_dict())
+    rope.dp.p = base.dp.p
+    rope.rope_proj.weight.data.zero_()
+
+    out_base = base(x)
+    out_rope = rope(x, pos)
+    assert torch.allclose(out_base, out_rope, atol=1e-6)
+
+
+def test_rope_detailed():
+    torch.manual_seed(5)
+    batch, seq_len, dim, heads = 1, 5, 64, 4
+    attn = ModernAttention(
+        dim,
+        heads,
+        dp_rate=0.0,
+        attn_mode="qk",
+        pos_dim=dim,
+        kv_heads=heads,
+        use_rope=True,
+    )
+    x = torch.randn(batch, seq_len, dim)
+    pos = torch.randn(batch, seq_len, dim)
+
+    print("Testing RoPE implementation...")
+    out = attn(x, pos)
+    print(f"✓ Input shape: {x.shape}")
+    print(f"✓ Output shape: {out.shape}")
+    assert out.shape == (batch, seq_len, dim)
+
+    pos_rev = pos.flip(1)
+    out_rev = attn(x, pos_rev)
+    diff = torch.abs(out - out_rev).mean()
+    print(f"✓ Position sensitivity test - mean difference: {diff.item():.6f}")
+    assert diff > 1e-6, "RoPE should be sensitive to positional changes"
+    print("✓ RoPE is position-sensitive (good!)")
+
+    out_same = attn(x, pos)
+    same_diff = torch.abs(out - out_same).mean()
+    print(f"✓ Same position consistency - mean difference: {same_diff.item():.6f}")
+    assert same_diff < 1e-6, "Identical positions should yield identical outputs"
+    print("✓ Same positions produce same output (good!)")
+
+    print(f"✓ Output range: [{out.min().item():.3f}, {out.max().item():.3f}]")
+    print("All RoPE tests completed!")
+
 test_attention_mha_matches_legacy()
 test_transformer_mha_matches_legacy()
 test_attention_mqa_reduces_to_single_kv_head()
 test_attention_gqa_matches_grouped_behavior()
 test_attention_mqa_matches_grouped_behavior()
+test_attention_rope_matches_no_rope_when_projection_zero()
+test_rope_detailed()
 print("All tests passed")
