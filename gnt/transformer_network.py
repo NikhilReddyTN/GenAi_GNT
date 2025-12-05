@@ -368,12 +368,14 @@ class GNT(nn.Module):
         viewdirs_ = viewdirs[:, None].expand(pts_.shape)
         embed = torch.cat([pts_, viewdirs_], dim=-1)
         input_pts, input_views = torch.split(embed, [self.posenc_dim, self.viewenc_dim], dim=-1)
-        rope_pos = embed if self.use_rope else None
+        rope_positions = None
 
         # project rgb features to netwidth
         rgb_feat = self.rgbfeat_fc(rgb_feat)
         # q_init -> maxpool
         q = rgb_feat.max(dim=2)[0]
+        if self.use_rope:
+            rope_positions = torch.arange(q.shape[2], device=q.device)
 
         # transformer modules
         for i, (crosstrans, q_fc, selftrans) in enumerate(
@@ -386,7 +388,11 @@ class GNT(nn.Module):
                 q = torch.cat((q, input_pts, input_views), dim=-1)
                 q = q_fc(q)
             # ray transformer
-            q = selftrans(q, pos=rope_pos, ret_attn=self.ret_alpha)
+            q = selftrans(
+                q,
+                pos=rope_positions,
+                ret_attn=self.ret_alpha,
+            )
             # 'learned' density
             if self.ret_alpha:
                 q, attn = q
