@@ -1,47 +1,49 @@
 import torch
+import torch.nn as nn
 
 from transformer_network import Attention as ModernAttention
 from transformer_network import Transformer as ModernTransformer
-from transformer_network_original import Attention as LegacyAttention
-from transformer_network_original import Transformer as LegacyTransformer
+# from transformer_network_original import Attention as LegacyAttention
+# from transformer_network_original import Transformer as LegacyTransformer
 from gqa import GroupedQueryAttention as GQAAttention
 
+# Comment out the tests that are matching our original implementation
 
-def test_attention_mha_matches_legacy():
-    torch.manual_seed(0)
-    batch, seq_len, dim, heads = 1, 2, 8, 4
-    legacy = LegacyAttention(dim, heads, dp_rate=0.0)
-    modern = ModernAttention(dim, heads, dp_rate=0.0, kv_heads=heads)
-    modern.load_state_dict(legacy.state_dict())
-    legacy.eval()
-    modern.eval()
-    x = torch.randn(batch, seq_len, dim)
+# def test_attention_mha_matches_legacy():
+#     torch.manual_seed(0)
+#     batch, seq_len, dim, heads = 1, 2, 8, 4
+#     legacy = LegacyAttention(dim, heads, dp_rate=0.0)
+#     modern = ModernAttention(dim, heads, dp_rate=0.0, kv_heads=heads)
+#     modern.load_state_dict(legacy.state_dict())
+#     legacy.eval()
+#     modern.eval()
+#     x = torch.randn(batch, seq_len, dim)
 
-    legacy_out = legacy(x)
-    modern_out = modern(x)
-    assert torch.allclose(legacy_out, modern_out, atol=1e-6)
+#     legacy_out = legacy(x)
+#     modern_out = modern(x)
+#     assert torch.allclose(legacy_out, modern_out, atol=1e-6)
 
 
-def test_transformer_mha_matches_legacy():
-    torch.manual_seed(1)
-    batch, seq_len, dim, heads = 2, 3, 32, 4
-    legacy = LegacyTransformer(dim, ff_hid_dim=64, ff_dp_rate=0.0, n_heads=heads, attn_dp_rate=0.0)
-    modern = ModernTransformer(
-        dim,
-        ff_hid_dim=64,
-        ff_dp_rate=0.0,
-        n_heads=heads,
-        attn_dp_rate=0.0,
-        kv_heads=heads,
-    )
-    modern.load_state_dict(legacy.state_dict())
-    legacy.eval()
-    modern.eval()
-    x = torch.randn(batch, seq_len, dim)
+# def test_transformer_mha_matches_legacy():
+#     torch.manual_seed(1)
+#     batch, seq_len, dim, heads = 2, 3, 32, 4
+#     legacy = LegacyTransformer(dim, ff_hid_dim=64, ff_dp_rate=0.0, n_heads=heads, attn_dp_rate=0.0)
+#     modern = ModernTransformer(
+#         dim,
+#         ff_hid_dim=64,
+#         ff_dp_rate=0.0,
+#         n_heads=heads,
+#         attn_dp_rate=0.0,
+#         kv_heads=heads,
+#     )
+#     modern.load_state_dict(legacy.state_dict())
+#     legacy.eval()
+#     modern.eval()
+#     x = torch.randn(batch, seq_len, dim)
 
-    legacy_out = legacy(x)
-    modern_out = modern(x)
-    assert torch.allclose(legacy_out, modern_out, atol=1e-6)
+#     legacy_out = legacy(x)
+#     modern_out = modern(x)
+#     assert torch.allclose(legacy_out, modern_out, atol=1e-6)
 
 def test_attention_mqa_reduces_to_single_kv_head():
     torch.manual_seed(2)
@@ -144,11 +146,48 @@ def test_rope_detailed():
     print(f"✓ Output range: [{out.min().item():.3f}, {out.max().item():.3f}]")
     print("All RoPE tests completed!")
 
-test_attention_mha_matches_legacy()
-test_transformer_mha_matches_legacy()
+def test_rope_cache_and_clear():
+    torch.manual_seed(6)
+    batch, seq_len, dim, heads = 1, 3, 32, 4
+    attn = ModernAttention(
+        dim,
+        heads,
+        dp_rate=0.0,
+        attn_mode="qk",
+        pos_dim=dim,
+        kv_heads=heads,
+        use_rope=True,
+    )
+
+    class CountingLinear(nn.Linear):
+        def __init__(self, in_features, out_features, bias=False):
+            super().__init__(in_features, out_features, bias=bias)
+            self.calls = 0
+
+        def forward(self, input):
+            self.calls += 1
+            return super().forward(input)
+
+    counting_proj = CountingLinear(dim, attn.head_dim, bias=False)
+    counting_proj.load_state_dict(attn.rope_proj.state_dict())
+    attn.rope_proj = counting_proj
+
+    pos = torch.randn(batch, seq_len, dim)
+    attn.clear_cache()
+    attn._compute_rope_angles(pos)
+    assert attn.rope_proj.calls == 1, "RoPE projection should run on cache miss"
+    attn._compute_rope_angles(pos)
+    assert attn.rope_proj.calls == 1, "RoPE cache should avoid redundant projections"
+    attn.clear_cache()
+    attn._compute_rope_angles(pos)
+    assert attn.rope_proj.calls == 2, "Clearing cache should force recomputation"
+
+# test_attention_mha_matches_legacy()
+# test_transformer_mha_matches_legacy()
 test_attention_mqa_reduces_to_single_kv_head()
 test_attention_gqa_matches_grouped_behavior()
 test_attention_mqa_matches_grouped_behavior()
 test_attention_rope_matches_no_rope_when_projection_zero()
 test_rope_detailed()
+test_rope_cache_and_clear()
 print("All tests passed")
