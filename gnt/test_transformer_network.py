@@ -81,11 +81,10 @@ def test_attention_mqa_matches_grouped_behavior():
 
     assert torch.allclose(modern_out, gt_out, atol=1e-5)
 
-def test_attention_rope_matches_no_rope_when_projection_zero():
+def test_attention_rope_matches_no_rope_when_positions_zero():
     torch.manual_seed(4)
     batch, seq_len, dim, heads = 2, 3, 32, 4
     x = torch.randn(batch, seq_len, dim)
-    pos = torch.randn(batch, seq_len, dim)
 
     base = ModernAttention(dim, heads, dp_rate=0.0, kv_heads=heads)
     rope = ModernAttention(
@@ -102,10 +101,9 @@ def test_attention_rope_matches_no_rope_when_projection_zero():
     rope.v_fc.load_state_dict(base.v_fc.state_dict())
     rope.out_fc.load_state_dict(base.out_fc.state_dict())
     rope.dp.p = base.dp.p
-    rope.rope_proj.weight.data.zero_()
-
     out_base = base(x)
-    out_rope = rope(x, pos)
+    zero_pos = torch.zeros(seq_len, dtype=torch.long, device=x.device)
+    out_rope = rope(x, rope_positions=zero_pos)
     assert torch.allclose(out_base, out_rope, atol=1e-6)
 
 
@@ -122,22 +120,22 @@ def test_rope_detailed():
         use_rope=True,
     )
     x = torch.randn(batch, seq_len, dim)
-    pos = torch.randn(batch, seq_len, dim)
+    base_positions = torch.arange(seq_len, device=x.device)
 
     print("Testing RoPE implementation...")
-    out = attn(x, pos)
+    out = attn(x, rope_positions=base_positions)
     print(f"✓ Input shape: {x.shape}")
     print(f"✓ Output shape: {out.shape}")
     assert out.shape == (batch, seq_len, dim)
 
-    pos_rev = pos.flip(1)
-    out_rev = attn(x, pos_rev)
+    pos_rev = torch.arange(seq_len - 1, -1, -1, device=x.device)
+    out_rev = attn(x, rope_positions=pos_rev)
     diff = torch.abs(out - out_rev).mean()
     print(f"✓ Position sensitivity test - mean difference: {diff.item():.6f}")
     assert diff > 1e-6, "RoPE should be sensitive to positional changes"
     print("✓ RoPE is position-sensitive (good!)")
 
-    out_same = attn(x, pos)
+    out_same = attn(x, rope_positions=base_positions)
     same_diff = torch.abs(out - out_same).mean()
     print(f"✓ Same position consistency - mean difference: {same_diff.item():.6f}")
     assert same_diff < 1e-6, "Identical positions should yield identical outputs"
@@ -187,7 +185,7 @@ def test_rope_cache_and_clear():
 test_attention_mqa_reduces_to_single_kv_head()
 test_attention_gqa_matches_grouped_behavior()
 test_attention_mqa_matches_grouped_behavior()
-test_attention_rope_matches_no_rope_when_projection_zero()
+test_attention_rope_matches_no_rope_when_positions_zero()
 test_rope_detailed()
 test_rope_cache_and_clear()
 print("All tests passed")
