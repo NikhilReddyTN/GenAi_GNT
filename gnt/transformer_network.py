@@ -427,7 +427,7 @@ class GNT(nn.Module):
             # embed positional information
             if i % 2 == 0:
                 q = torch.cat((q, input_pts, input_views), dim=-1)
-            q = q_fc(q)
+                q = q_fc(q)
             # ray transformer
             q = selftrans(q, pos=embed, rope_positions=rope_positions, ret_attn=self.ret_alpha)
             # 'learned' density
