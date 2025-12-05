@@ -156,29 +156,15 @@ def test_rope_cache_and_clear():
         kv_heads=heads,
         use_rope=True,
     )
-
-    class CountingLinear(nn.Linear):
-        def __init__(self, in_features, out_features, bias=False):
-            super().__init__(in_features, out_features, bias=bias)
-            self.calls = 0
-
-        def forward(self, input):
-            self.calls += 1
-            return super().forward(input)
-
-    counting_proj = CountingLinear(dim, attn.head_dim, bias=False)
-    counting_proj.load_state_dict(attn.rope_proj.state_dict())
-    attn.rope_proj = counting_proj
-
-    pos = torch.randn(batch, seq_len, dim)
     attn.clear_cache()
-    attn._compute_rope_angles(pos)
-    assert attn.rope_proj.calls == 1, "RoPE projection should run on cache miss"
-    attn._compute_rope_angles(pos)
-    assert attn.rope_proj.calls == 1, "RoPE cache should avoid redundant projections"
+    assert len(attn.rope.cache) == 0
+    x = torch.randn(batch, seq_len, dim)
+    attn(x)
+    assert len(attn.rope.cache) == 1, "RoPE cache should populate after first use"
+    attn(x)
+    assert len(attn.rope.cache) == 1, "Repeated use should reuse cached cos/sin pairs"
     attn.clear_cache()
-    attn._compute_rope_angles(pos)
-    assert attn.rope_proj.calls == 2, "Clearing cache should force recomputation"
+    assert len(attn.rope.cache) == 0, "Cache should be empty after clear_cache()"
 
 # test_attention_mha_matches_legacy()
 # test_transformer_mha_matches_legacy()
