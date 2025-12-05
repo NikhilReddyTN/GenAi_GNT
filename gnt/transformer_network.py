@@ -203,14 +203,46 @@ class Attention(nn.Module):
                 raise ValueError("RoPE can only be used with qk or gate attention modes.")
             if self.head_dim % 2 != 0:
                 raise ValueError("head_dim must be even to use RoPE.")
-            self.rope = RotaryPositionalEmbeddings(self.head_dim)
+            self.rope_proj = nn.Linear(pos_dim, self.head_dim, bias=False)
+            self._rope_cache = {}
+        else:
+            self._rope_cache = {}
 
     def expand_kv(self, x):
         if self.heads_per_kv == 1:
             return x
         return x.repeat_interleave(self.heads_per_kv, dim=1)
 
-    def forward(self, x, pos=None, rope_positions=None, ret_attn=False):
+    def _rope_cache_key(self, pos):
+        return (
+            pos.data_ptr(),
+            getattr(pos, "_version", None),
+            tuple(pos.shape),
+            pos.device,
+            pos.dtype,
+            pos.requires_grad,
+        )
+
+    def _compute_rope_angles(self, pos):
+        if pos is None:
+            raise ValueError("pos must be provided when using RoPE.")
+        cache_key = None
+        if self.use_rope:
+            cache_key = self._rope_cache_key(pos)
+            cached = self._rope_cache.get(cache_key)
+            if cached is not None:
+                return cached
+        angles = self.rope_proj(pos)  # (B, seq, head_dim)
+        cos = torch.cos(angles).unsqueeze(1)
+        sin = torch.sin(angles).unsqueeze(1)
+        if cache_key is not None:
+            self._rope_cache[cache_key] = (cos, sin)
+        return cos, sin
+
+    def clear_cache(self):
+        self._rope_cache.clear()
+
+    def forward(self, x, pos=None, ret_attn=False):
         if self.attn_mode in ["qk", "gate"]:
             q = self.q_fc(x)
             q = q.view(x.shape[0], x.shape[1], self.n_heads, self.head_dim).permute(0, 2, 1, 3)
@@ -298,6 +330,10 @@ class Transformer(nn.Module):
             return x, attn.mean(dim=1)[:, 0]
         else:
             return x
+
+    def clear_cache(self):
+        if hasattr(self.attn, "clear_cache"):
+            self.attn.clear_cache()
 
 
 class GNT(nn.Module):
@@ -432,3 +468,8 @@ class GNT(nn.Module):
             return torch.cat([outputs, attn], dim=1)
         else:
             return outputs
+
+    def clear_cache(self):
+        for transformer in self.view_selftrans:
+            if hasattr(transformer, "clear_cache"):
+                transformer.clear_cache()
