@@ -121,6 +121,11 @@ def config_parser():
     parser.add_argument(
         "--gqa_group_size", type=int, default=1, help="number of groups for query heads in gqa"
     )
+    parser.add_argument(
+        "--use_rope",
+        action="store_true",
+        help="apply rotary position embeddings in the ray transformer",
+    )
 
     ########## checkpoints ##########
     parser.add_argument(
