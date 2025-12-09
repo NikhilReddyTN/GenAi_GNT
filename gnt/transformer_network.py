@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 import torch.nn as nn
+from einops import einsum, rearrange
 
 
 class RotaryPositionalEmbeddings(nn.Module):
@@ -31,7 +32,7 @@ class RotaryPositionalEmbeddings(nn.Module):
         return cos_C, sin_C
 
     def forward(self, Y, positions=None):
-        b, h, t, d = Y.shape
+        t, d = Y.shape[-2], Y.shape[-1]
         if positions is None:
             cos_C, sin_C = self._build_cache(t, Y.device, Y.dtype)
             cos_C = cos_C.view(1, 1, t, d)
@@ -216,21 +217,22 @@ class Attention(nn.Module):
 
     def forward(self, x, pos=None, rope_positions=None, ret_attn=False):
         if self.attn_mode in ["qk", "gate"]:
-            q = self.q_fc(x)
-            q = q.view(x.shape[0], x.shape[1], self.n_heads, self.head_dim).permute(0, 2, 1, 3)
-            k = self.k_fc(x)
-            k = k.view(x.shape[0], x.shape[1], self.kv_heads, self.head_dim).permute(0, 2, 1, 3)
-            k = self.expand_kv(k)
-        v = self.v_fc(x)
-        v = v.view(x.shape[0], x.shape[1], self.kv_heads, self.head_dim).permute(0, 2, 1, 3)
-        v = self.expand_kv(v)
+            q = self.q_fc(x) # (b, t, n_embd)
+            # for query, elt's split embedding dimension across both number of query heads and key/value heads
+            q = rearrange(q, 'b t (h_kv g d) -> b h_kv g t d', h_kv=self.kv_heads, g=self.n_heads//self.kv_heads)
+            k = self.k_fc(x) # (b, t, n_embd//group_size)
+            # for key, let's split the embedding dimension across number of key/values heads
+            k = rearrange(k, 'b t (h_kv d) -> b h_kv t d', h_kv=self.kv_heads)
+        v = self.v_fc(x) # (b, t, n_embd//group_size)
+        # for value, let's split the embedding dimension across number of key/values heads
+        v = rearrange(v, 'b t (h_kv d) -> b h_kv t d', h_kv=self.kv_heads)
 
         if self.use_rope and self.attn_mode in ["qk", "gate"]:
             q = self.rope(q, rope_positions)
             k = self.rope(k, rope_positions)
 
         if self.attn_mode in ["qk", "gate"]:
-            attn = torch.matmul(q, k.transpose(-2, -1)) / np.sqrt(q.shape[-1])
+            attn = einsum(q, k, 'b h_kv g q d, b h_kv k d -> b h_kv g q k') / np.sqrt(k.shape[-1])
             attn = torch.softmax(attn, dim=-1)
         elif self.attn_mode == "pos":
             pos = self.pos_fc(pos)
@@ -245,8 +247,8 @@ class Attention(nn.Module):
             attn /= attn.sum(dim=-1).unsqueeze(-1)
         attn = self.dp(attn)
 
-        out = torch.matmul(attn, v).permute(0, 2, 1, 3).contiguous()
-        out = out.view(x.shape[0], x.shape[1], -1)
+        out = einsum(attn, v, 'b h_kv g q k, b h_kv k d -> b h_kv g q d')
+        out = rearrange(out, 'b h_kv g q d -> b q (h_kv g d)')
         out = self.dp(self.out_fc(out))
         if ret_attn:
             return out, attn

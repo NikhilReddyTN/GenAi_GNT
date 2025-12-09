@@ -113,6 +113,8 @@ def train(args):
                 center_ratio=args.center_ratio,
             )
 
+            model.optimizer.zero_grad(set_to_none=True)
+
             with torch.profiler.profile(
                 activities=[torch.profiler.ProfilerActivity.CPU,
                 torch.profiler.ProfilerActivity.CUDA],
@@ -137,7 +139,6 @@ def train(args):
                 )
 
                 # compute loss
-                model.optimizer.zero_grad()
                 loss, scalars_to_log = criterion(ret["outputs_coarse"], ray_batch, scalars_to_log)
 
                 if ret["outputs_fine"] is not None:
@@ -158,69 +159,71 @@ def train(args):
 
             # Rest is logging
             if args.local_rank == 0:
-                if global_step % args.i_print == 0 or global_step < 10:
-                    # write mse and psnr stats
-                    mse_error = img2mse(ret["outputs_coarse"]["rgb"], ray_batch["rgb"]).item()
-                    scalars_to_log["train/coarse-loss"] = mse_error
-                    scalars_to_log["train/coarse-psnr-training-batch"] = mse2psnr(mse_error)
-                    if ret["outputs_fine"] is not None:
-                        mse_error = img2mse(ret["outputs_fine"]["rgb"], ray_batch["rgb"]).item()
-                        scalars_to_log["train/fine-loss"] = mse_error
-                        scalars_to_log["train/fine-psnr-training-batch"] = mse2psnr(mse_error)
+                # Don't build computation graph 
+                with torch.no_grad():
+                    if global_step % args.i_print == 0 or global_step < 10:
+                        # write mse and psnr stats
+                        mse_error = img2mse(ret["outputs_coarse"]["rgb"], ray_batch["rgb"]).item()
+                        scalars_to_log["train/coarse-loss"] = mse_error
+                        scalars_to_log["train/coarse-psnr-training-batch"] = mse2psnr(mse_error)
+                        if ret["outputs_fine"] is not None:
+                            mse_error = img2mse(ret["outputs_fine"]["rgb"], ray_batch["rgb"]).item()
+                            scalars_to_log["train/fine-loss"] = mse_error
+                            scalars_to_log["train/fine-psnr-training-batch"] = mse2psnr(mse_error)
 
-                    logstr = "{} Epoch: {}  step: {} ".format(args.expname, epoch, global_step)
-                    for k in scalars_to_log.keys():
-                        logstr += " {}: {:.6f}".format(k, scalars_to_log[k])
-                    print(logstr)
-                    print("each iter time {:.05f} seconds".format(dt))
+                        logstr = "{} Epoch: {}  step: {} ".format(args.expname, epoch, global_step)
+                        for k in scalars_to_log.keys():
+                            logstr += " {}: {:.6f}".format(k, scalars_to_log[k])
+                        print(logstr)
+                        print("each iter time {:.05f} seconds".format(dt))
 
-                if global_step % args.i_weights == 0:
-                    print("Saving checkpoints at {} to {}...".format(global_step, out_folder))
-                    fpath = os.path.join(out_folder, "model_{:06d}.pth".format(global_step))
-                    model.save_model(fpath)
+                    if global_step % args.i_weights == 0:
+                        print("Saving checkpoints at {} to {}...".format(global_step, out_folder))
+                        fpath = os.path.join(out_folder, "model_{:06d}.pth".format(global_step))
+                        model.save_model(fpath)
 
-                if global_step % args.i_img == 0:
-                    print("Logging a random validation view...")
-                    val_data = next(val_loader_iterator)
-                    tmp_ray_sampler = RaySamplerSingleImage(
-                        val_data, device, render_stride=args.render_stride
-                    )
-                    H, W = tmp_ray_sampler.H, tmp_ray_sampler.W
-                    gt_img = tmp_ray_sampler.rgb.reshape(H, W, 3)
-                    log_view(
-                        global_step,
-                        args,
-                        model,
-                        tmp_ray_sampler,
-                        projector,
-                        gt_img,
-                        render_stride=args.render_stride,
-                        prefix="val/",
-                        out_folder=out_folder,
-                        ret_alpha=args.N_importance > 0,
-                        single_net=args.single_net,
-                    )
-                    torch.cuda.empty_cache()
+                    if global_step % args.i_img == 0:
+                        print("Logging a random validation view...")
+                        val_data = next(val_loader_iterator)
+                        tmp_ray_sampler = RaySamplerSingleImage(
+                            val_data, device, render_stride=args.render_stride
+                        )
+                        H, W = tmp_ray_sampler.H, tmp_ray_sampler.W
+                        gt_img = tmp_ray_sampler.rgb.reshape(H, W, 3)
+                        log_view(
+                            global_step,
+                            args,
+                            model,
+                            tmp_ray_sampler,
+                            projector,
+                            gt_img,
+                            render_stride=args.render_stride,
+                            prefix="val/",
+                            out_folder=out_folder,
+                            ret_alpha=args.N_importance > 0,
+                            single_net=args.single_net,
+                        )
+                        torch.cuda.empty_cache()
 
-                    print("Logging current training view...")
-                    tmp_ray_train_sampler = RaySamplerSingleImage(
-                        train_data, device, render_stride=1
-                    )
-                    H, W = tmp_ray_train_sampler.H, tmp_ray_train_sampler.W
-                    gt_img = tmp_ray_train_sampler.rgb.reshape(H, W, 3)
-                    log_view(
-                        global_step,
-                        args,
-                        model,
-                        tmp_ray_train_sampler,
-                        projector,
-                        gt_img,
-                        render_stride=1,
-                        prefix="train/",
-                        out_folder=out_folder,
-                        ret_alpha=args.N_importance > 0,
-                        single_net=args.single_net,
-                    )
+                        print("Logging current training view...")
+                        tmp_ray_train_sampler = RaySamplerSingleImage(
+                            train_data, device, render_stride=1
+                        )
+                        H, W = tmp_ray_train_sampler.H, tmp_ray_train_sampler.W
+                        gt_img = tmp_ray_train_sampler.rgb.reshape(H, W, 3)
+                        log_view(
+                            global_step,
+                            args,
+                            model,
+                            tmp_ray_train_sampler,
+                            projector,
+                            gt_img,
+                            render_stride=1,
+                            prefix="train/",
+                            out_folder=out_folder,
+                            ret_alpha=args.N_importance > 0,
+                            single_net=args.single_net,
+                        )
             global_step += 1
             if global_step > model.start_step + args.n_iters + 1:
                 break
